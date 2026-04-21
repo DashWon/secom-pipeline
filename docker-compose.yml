@@ -29,3 +29,36 @@ services:
     environment:
       KAFKA_CLUSTERS_0_NAME: secom-cluster
       KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:29092
+
+  postgres:
+    image: postgres:15
+    container_name: postgres
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_DB: secom
+      POSTGRES_USER: secom
+      POSTGRES_PASSWORD: secom123
+    volumes:
+      - ./spark/schema.sql:/docker-entrypoint-initdb.d/schema.sql
+      - postgres-data:/var/lib/postgresql/data
+
+  spark:
+    build: ./spark
+    container_name: spark
+    depends_on:
+      - kafka
+      - postgres
+    volumes:
+      - ./spark:/app
+      - ./data:/data
+      
+    working_dir: /app
+    command: sleep infinity
+    deploy:
+      resources:
+        limits:
+          memory: 2g
+
+volumes:
+  postgres-data:
