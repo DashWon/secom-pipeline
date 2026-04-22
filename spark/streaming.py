@@ -1,7 +1,8 @@
-import json
 from pyspark.sql import SparkSession
 from pyspark.sql.functions import col, from_json, to_json
 from pyspark.sql.types import StringType, IntegerType, FloatType, StructType, StructField, MapType
+
+# 1. SparkSession 생성
 
 spark = SparkSession.builder \
     .appName("SECOM-Streaming") \
@@ -11,12 +12,16 @@ spark = SparkSession.builder \
 spark.sparkContext.setLogLevel("WARN")
 print("SparkSession created")
 
+# 2. JDBC 설정
+
 JDBC_URL = "jdbc:postgresql://postgres:5432/secom"
 JDBC_PROPERTIES = {
     "user": "secom",
     "password": "secom123",
     "driver": "org.postgresql.Driver",
 }
+
+# 3. 센서 통계 설정
 
 SENSOR_STATS = {
     "0": {"mean": 3045.2, "std": 152.7},
@@ -30,11 +35,15 @@ NAN_THRESHOLD = 100
 
 broadcast_stats = spark.sparkContext.broadcast(SENSOR_STATS)
 
+# 4. 스키마 설정
+
 schema = StructType([
     StructField("event_time", StringType(), True),
     StructField("sensors", MapType(StringType(), FloatType()), True),
     StructField("pass_fail", IntegerType(), True),
 ])
+
+# 5. Kafka 데이터 읽기
 
 kafka_df = spark.readStream \
     .format("kafka") \
@@ -42,6 +51,8 @@ kafka_df = spark.readStream \
     .option("subscribe", "secom-sensors") \
     .option("startingOffsets", "latest") \
     .load()
+
+# 6. Kafka 데이터 파싱
 
 parsed_df = kafka_df \
     .selectExpr("CAST(value AS STRING) as json_str") \
@@ -51,6 +62,8 @@ parsed_df = kafka_df \
         col("data.sensors").alias("sensors"),
         col("data.pass_fail").alias("pass_fail"),
     )
+
+# 7. 배치 처리
 
 def process_batch(batch_df, batch_id):
     if batch_df.isEmpty():
@@ -113,7 +126,9 @@ def process_batch(batch_df, batch_id):
 
     batch_df.unpersist()
 
-print("Starting stream...")
+# 8. 스트리밍 시작
+
+print("스트리밍 시작...")
 query = parsed_df.writeStream \
     .foreachBatch(process_batch) \
     .option("checkpointLocation", "/tmp/checkpoint/secom-streaming") \
