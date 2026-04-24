@@ -52,13 +52,52 @@ services:
     volumes:
       - ./spark:/app
       - ./data:/data
-      
     working_dir: /app
     command: sleep infinity
     deploy:
       resources:
         limits:
           memory: 2g
+
+  airflow:
+    image: apache/airflow:3.2.1
+    container_name: airflow
+    depends_on:
+      - postgres
+    environment:
+      AIRFLOW__CORE__EXECUTOR: LocalExecutor
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://secom:secom123@postgres:5432/secom
+      AIRFLOW__CORE__LOAD_EXAMPLES: 'false'
+      AIRFLOW__WEBSERVER__SECRET_KEY: 'secom-airflow-secret'
+      AIRFLOW__CORE__DAGS_FOLDER: /opt/airflow/dags
+    volumes:
+      - ./airflow/dags:/opt/airflow/dags
+    ports:
+      - "8090:8080"
+    command: >
+      bash -c "
+        pip install apache-airflow-providers-postgres apache-airflow-providers-standard --quiet &&
+        airflow db migrate &&
+        airflow connections add secom_postgres
+          --conn-type postgres
+          --conn-host postgres
+          --conn-port 5432
+          --conn-schema secom
+          --conn-login secom
+          --conn-password secom123 || true &&
+        airflow users create
+          --username admin
+          --password admin
+          --firstname Admin
+          --lastname User
+          --role Admin
+          --email admin@secom.local || true &&
+        exec airflow standalone
+      "
+    deploy:
+      resources:
+        limits:
+          memory: 1g
 
 volumes:
   postgres-data:
