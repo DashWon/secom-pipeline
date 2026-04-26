@@ -1,4 +1,19 @@
-version: '3.8'
+x-airflow-common:
+  &airflow-common
+  build: ./airflow
+  environment:
+    &airflow-common-env
+    AIRFLOW__CORE__EXECUTOR: LocalExecutor
+    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://secom:secom123@postgres:5432/secom
+    AIRFLOW__CORE__FERNET_KEY: ''
+    AIRFLOW__CORE__LOAD_EXAMPLES: 'false'
+    AIRFLOW__WEBSERVER__SECRET_KEY: 'secom-airflow-secret'
+  volumes:
+    - ./airflow/dags:/opt/airflow/dags
+  depends_on:
+    postgres:
+      condition: service_healthy
+
 services:
   kafka:
     image: confluentinc/cp-kafka:7.5.1
@@ -36,12 +51,18 @@ services:
     ports:
       - "5432:5432"
     environment:
-      POSTGRES_DB: secom
-      POSTGRES_USER: secom
-      POSTGRES_PASSWORD: secom123
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
     volumes:
       - ./spark/schema.sql:/docker-entrypoint-initdb.d/schema.sql
       - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "secom"]
+      interval: 10s
+      retries: 5
+      start_period: 5s
+    restart: always
 
   spark:
     build: ./spark
@@ -59,45 +80,38 @@ services:
         limits:
           memory: 2g
 
-  airflow:
-    image: apache/airflow:3.2.1
-    container_name: airflow
-    depends_on:
-      - postgres
-    environment:
-      AIRFLOW__CORE__EXECUTOR: LocalExecutor
-      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://secom:secom123@postgres:5432/secom
-      AIRFLOW__CORE__LOAD_EXAMPLES: 'false'
-      AIRFLOW__WEBSERVER__SECRET_KEY: 'secom-airflow-secret'
-      AIRFLOW__CORE__DAGS_FOLDER: /opt/airflow/dags
-    volumes:
-      - ./airflow/dags:/opt/airflow/dags
+  airflow-init:
+    <<: *airflow-common
+    container_name: airflow-init
+    entrypoint: /bin/bash
+    command:
+      - -c
+      - |
+        airflow db migrate
+        airflow users create --username admin --password admin --firstname Admin --lastname User --role Admin --email admin@secom.local || true
+        airflow connections add secom_postgres --conn-type postgres --conn-host postgres --conn-port 5432 --conn-schema secom --conn-login secom --conn-password secom123 || true
+        echo "Init complete"
+    restart: "no"
+
+  airflow-webserver:
+    <<: *airflow-common
+    container_name: airflow-webserver
+    command: webserver
     ports:
       - "8090:8080"
-    command: >
-      bash -c "
-        pip install apache-airflow-providers-postgres apache-airflow-providers-standard --quiet &&
-        airflow db migrate &&
-        airflow connections add secom_postgres
-          --conn-type postgres
-          --conn-host postgres
-          --conn-port 5432
-          --conn-schema secom
-          --conn-login secom
-          --conn-password secom123 || true &&
-        airflow users create
-          --username admin
-          --password admin
-          --firstname Admin
-          --lastname User
-          --role Admin
-          --email admin@secom.local || true &&
-        exec airflow standalone
-      "
-    deploy:
-      resources:
-        limits:
-          memory: 1g
+    restart: always
+    depends_on:
+      airflow-init:
+        condition: service_completed_successfully
+
+  airflow-scheduler:
+    <<: *airflow-common
+    container_name: airflow-scheduler
+    command: scheduler
+    restart: always
+    depends_on:
+      airflow-init:
+        condition: service_completed_successfully
 
 volumes:
   postgres-data:
