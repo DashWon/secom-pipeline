@@ -34,7 +34,7 @@
 
 1. batch_df.persist() - 메모리 캐싱 (2번 읽기 방지)
 2. Sink 1: raw_events - to_json()으로 Map을 JSON 변환 후 PostgreSQL INSERT
-3. Sink 2: anomalies - collect()로 Python 처리, 이상치 판정 후 INSERT
+3. Sink 2: anomalies - UDF + explode로 분산 처리 후 INSERT (collect 미사용)
 4. batch_df.unpersist() - 메모리 해제
 
 ### Error Handling
@@ -108,22 +108,22 @@
 raw_events (Bronze):
 
 - id: SERIAL PRIMARY KEY
-- event_time: TIMESTAMP NOT NULL
+- event_time: TIMESTAMPTZ NOT NULL (UTC 표준 저장)
 - sensors: JSONB NOT NULL (590개 센서값)
 - pass_fail: INTEGER NOT NULL
-- inserted_at: TIMESTAMP DEFAULT NOW()
+- inserted_at: TIMESTAMPTZ DEFAULT NOW()
 
 anomalies (Silver):
 
 - id: SERIAL PRIMARY KEY
-- event_time: TIMESTAMP NOT NULL
+- event_time: TIMESTAMPTZ NOT NULL (UTC 표준 저장)
 - sensor_id: VARCHAR(10) NOT NULL
 - sensor_value: FLOAT NOT NULL
 - z_score: FLOAT NOT NULL
 - anomaly_type: VARCHAR(50) NOT NULL
 - threshold_upper: FLOAT
 - threshold_lower: FLOAT
-- inserted_at: TIMESTAMP DEFAULT NOW()
+- inserted_at: TIMESTAMPTZ DEFAULT NOW()
 
 daily_agg (Gold, 5차시 구현 예정):
 
@@ -132,7 +132,7 @@ daily_agg (Gold, 5차시 구현 예정):
 - pass_count: INTEGER
 - anomaly_count: INTEGER
 - anomaly_rate: FLOAT
-- created_at: TIMESTAMP DEFAULT NOW()
+- created_at: TIMESTAMPTZ DEFAULT NOW()
 
 ### 인덱스
 
@@ -151,7 +151,7 @@ daily_agg (Gold, 5차시 구현 예정):
 | ---------------------------- | ------------------------------- | -------------------- |
 | spark.sql.shuffle.partitions | 3                               | Kafka 파티션 3개에 매칭     |
 | spark.jars.packages          | spark-sql-kafka, postgresql     | Kafka 연결 + JDBC 드라이버 |
-| checkpointLocation           | /tmp/checkpoint/secom-streaming | 장애 복구 지점 저장          |
+| checkpointLocation           | /app/checkpoint/secom-streaming | 컨테이너 재시작 후에도 복구 지점 유지 |
 | 메모리 제한                       | 2GB (docker-compose)            | 노트북 리소스 고려           |
 
 

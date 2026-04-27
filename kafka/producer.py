@@ -1,19 +1,20 @@
 import json
+import os
 import time
 import random
 import sys
-import signal
 from datetime import datetime
+from datetime import timezone
 
 import pandas as pd
 from confluent_kafka import Producer
 
 
 # 1. 설정값
-BOOTSTRAP_SERVERS = "localhost:9092"
-TOPIC = "secom-sensors"
+BOOTSTRAP_SERVERS = os.getenv("KAFKA_BOOTSTRAP_SERVERS", "localhost:9092")
+TOPIC = os.getenv("KAFKA_TOPIC", "secom-sensors")
 REPLAY_SPEED = int(sys.argv[1]) if len(sys.argv) > 1 else 1
-CSV_PATH = "data/uci-secom.csv"
+CSV_PATH = os.getenv("SECOM_CSV_PATH", "data/uci-secom.csv")
 
 # 2. SECOM CSV 로드
 try:
@@ -55,7 +56,8 @@ def delivery_callback(err, msg):
 # 5. 메시지 생성 함수
 def build_message(row):
     return {
-        "event_time": datetime.now().isoformat(),
+        # UTC ISO-8601 (Z)로 발행: 저장 표준 시각
+        "event_time": datetime.now(timezone.utc).isoformat(),
         "sensors": {
             col: (None if pd.isna(row[col]) else round(float(row[col]), 4))
             for col in sensor_cols
@@ -108,6 +110,5 @@ except KeyboardInterrupt:
 finally:
     print(f"\n\n남은 메시지 전송 중...")
     producer.flush()
-    producer.close()
     print(f"Total sent: {sent_count} | Total failed: {fail_count}")
     print(f"Cycles completed: {cycle if 'cycle' in dir() else 0}")

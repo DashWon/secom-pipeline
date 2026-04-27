@@ -4,10 +4,16 @@ x-airflow-common:
   environment:
     &airflow-common-env
     AIRFLOW__CORE__EXECUTOR: LocalExecutor
-    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://secom:secom123@postgres:5432/secom
+    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://${POSTGRES_USER}:${POSTGRES_PASSWORD}@${POSTGRES_HOST:-postgres}:${POSTGRES_PORT:-5432}/${POSTGRES_DB}
     AIRFLOW__CORE__FERNET_KEY: ''
     AIRFLOW__CORE__LOAD_EXAMPLES: 'false'
-    AIRFLOW__WEBSERVER__SECRET_KEY: 'secom-airflow-secret'
+    AIRFLOW__WEBSERVER__SECRET_KEY: ${AIRFLOW_WEBSERVER_SECRET_KEY:-secom-airflow-secret}
+    POSTGRES_HOST: ${POSTGRES_HOST:-postgres}
+    POSTGRES_PORT: ${POSTGRES_PORT:-5432}
+    POSTGRES_DB: ${POSTGRES_DB}
+    POSTGRES_USER: ${POSTGRES_USER}
+    POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    TZ: Asia/Seoul
   volumes:
     - ./airflow/dags:/opt/airflow/dags
   depends_on:
@@ -33,6 +39,7 @@ services:
       KAFKA_LOG_RETENTION_MS: 604800000
       KAFKA_MESSAGE_MAX_BYTES: 1048576
       CLUSTER_ID: MkU3OEVBNTcwNTJENDM2Qk
+      TZ: Asia/Seoul
 
   kafka-ui:
     image: provectuslabs/kafka-ui:latest
@@ -44,6 +51,7 @@ services:
     environment:
       KAFKA_CLUSTERS_0_NAME: secom-cluster
       KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:29092
+      TZ: Asia/Seoul
 
   postgres:
     image: postgres:15
@@ -54,11 +62,12 @@ services:
       POSTGRES_DB: ${POSTGRES_DB}
       POSTGRES_USER: ${POSTGRES_USER}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      TZ: Asia/Seoul
     volumes:
       - ./spark/schema.sql:/docker-entrypoint-initdb.d/schema.sql
       - postgres-data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD", "pg_isready", "-U", "secom"]
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
       interval: 10s
       retries: 5
       start_period: 5s
@@ -72,13 +81,19 @@ services:
       - postgres
     volumes:
       - ./spark:/app
+      - ./spark/checkpoint:/app/checkpoint
       - ./data:/data
     working_dir: /app
+    environment:
+      POSTGRES_HOST: ${POSTGRES_HOST:-postgres}
+      POSTGRES_PORT: ${POSTGRES_PORT:-5432}
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      SPARK_CHECKPOINT_LOCATION: /app/checkpoint/secom-streaming
+      TZ: Asia/Seoul
     command: sleep infinity
-    deploy:
-      resources:
-        limits:
-          memory: 2g
+    mem_limit: 2g
 
   airflow-init:
     <<: *airflow-common
@@ -89,7 +104,7 @@ services:
       - |
         airflow db migrate
         airflow users create --username admin --password admin --firstname Admin --lastname User --role Admin --email admin@secom.local || true
-        airflow connections add secom_postgres --conn-type postgres --conn-host postgres --conn-port 5432 --conn-schema secom --conn-login secom --conn-password secom123 || true
+        airflow connections add secom_postgres --conn-type postgres --conn-host $${POSTGRES_HOST} --conn-port $${POSTGRES_PORT} --conn-schema $${POSTGRES_DB} --conn-login $${POSTGRES_USER} --conn-password $${POSTGRES_PASSWORD} || true
         echo "Init complete"
     restart: "no"
 

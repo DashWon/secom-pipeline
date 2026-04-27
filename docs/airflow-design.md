@@ -38,10 +38,10 @@ check_data → aggregate_and_load → validate
 
 ## 3. 스케줄
 
-schedule: @daily (매일 자정 UTC)
+schedule: @daily (매일 자정 Asia/Seoul)
 start_date: 2026-04-22
 catchup: False
-timezone: UTC (UI에서 KST 표시 가능)
+timezone: Asia/Seoul
 
 ### 왜 @daily인가
 - 일 단위 집계가 자연스러운 주기
@@ -88,9 +88,15 @@ INSERT ... ON CONFLICT (date) DO UPDATE SET ...
 - CeleryExecutor는 Redis + Worker 추가 → 리소스 과도
 
 ### Timezone 처리
-- 저장: event_time은 UTC 없이 로컬 시간
-- 집계: AT TIME ZONE 'Asia/Seoul'로 명시적 변환
-- DAG 실행: UTC 기준, UI 표시는 KST 변환 가능
+- 저장: event_time은 UTC 표준 (TIMESTAMPTZ)
+- 집계: KST ds 경계(00:00~24:00)를 `AT TIME ZONE 'Asia/Seoul'`로 UTC instant로 변환 후 필터링
+- DAG 실행/표시 모두 Asia/Seoul 기준
+
+### KST 조회 예시
+- 최근 원본 이벤트를 한국시간으로 확인:
+  - `SELECT event_time_kst, pass_fail FROM raw_events_kst ORDER BY event_time_kst DESC LIMIT 10;`
+- 특정 한국 날짜(예: 2026-04-27) 범위 조회:
+  - `SELECT COUNT(*) FROM raw_events WHERE event_time >= ('2026-04-27'::date::timestamp AT TIME ZONE 'Asia/Seoul') AND event_time < ((('2026-04-27'::date + INTERVAL '1 day')::timestamp) AT TIME ZONE 'Asia/Seoul');`
 
 ## 7. Docker Compose 구성
 

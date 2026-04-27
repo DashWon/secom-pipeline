@@ -1,4 +1,5 @@
-from datetime import datetime, timedelta
+from datetime import timedelta
+import pendulum
 from airflow import DAG
 from airflow.operators.python import PythonOperator
 from airflow.exceptions import AirflowSkipException
@@ -19,8 +20,10 @@ def check_data(**context):
     ds = context["ds"]
     hook = get_hook()
     result = hook.get_first(
-        "SELECT COUNT(*) FROM raw_events WHERE (event_time AT TIME ZONE 'Asia/Seoul')::date = %s",
-        parameters=(ds,),
+        """SELECT COUNT(*) FROM raw_events
+           WHERE event_time >= (%(ds)s::date::timestamp AT TIME ZONE 'Asia/Seoul')
+             AND event_time <  (((%(ds)s::date + INTERVAL '1 day')::timestamp) AT TIME ZONE 'Asia/Seoul')""",
+        parameters={"ds": ds},
     )
     count = result[0]
     if count == 0:
@@ -35,12 +38,14 @@ def aggregate_and_load(**context):
             SELECT COUNT(*) AS total_events,
                    COUNT(*) FILTER (WHERE pass_fail = -1) AS pass_count
             FROM raw_events
-            WHERE (event_time AT TIME ZONE 'Asia/Seoul')::date = %(ds)s::date
+            WHERE event_time >= (%(ds)s::date::timestamp AT TIME ZONE 'Asia/Seoul')
+              AND event_time <  (((%(ds)s::date + INTERVAL '1 day')::timestamp) AT TIME ZONE 'Asia/Seoul')
         ),
         anom AS (
             SELECT COUNT(*) AS anomaly_count
             FROM anomalies
-            WHERE (event_time AT TIME ZONE 'Asia/Seoul')::date = %(ds)s::date
+            WHERE event_time >= (%(ds)s::date::timestamp AT TIME ZONE 'Asia/Seoul')
+              AND event_time <  (((%(ds)s::date + INTERVAL '1 day')::timestamp) AT TIME ZONE 'Asia/Seoul')
         )
         INSERT INTO daily_agg (date, total_events, pass_count, anomaly_count, anomaly_rate)
         SELECT %(ds)s::date, base.total_events, base.pass_count, anom.anomaly_count,
@@ -74,7 +79,7 @@ with DAG(
     default_args=default_args,
     description="SECOM daily aggregation: raw_events + anomalies -> daily_agg",
     schedule="@daily",
-    start_date=datetime(2026, 4, 22),
+    start_date=pendulum.datetime(2026, 4, 22, tz="Asia/Seoul"),
     catchup=False,
     tags=["secom", "aggregation"],
 ) as dag:
