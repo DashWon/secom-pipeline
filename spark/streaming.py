@@ -1,4 +1,6 @@
 import os
+import json
+from datetime import datetime, timezone
 
 from pyspark.sql import SparkSession
 from pyspark.sql.functions import col, from_json, to_json, udf, explode
@@ -8,9 +10,9 @@ from pyspark.sql.types import (
 )
 
 # ============================================================
-# SECOM Spark Streaming (v2 — UDF 분산 처리)
+# SECOM Spark Streaming (v3 — UDF 분산 처리 + DLQ Fallback)
 # Kafka -> raw_events + anomalies (PostgreSQL)
-# collect() 제거 → Executor 단에서 분산 이상치 탐지
+# DB 장애 시 로컬 JSON 파일로 DLQ 저장 → Stream 유지
 # ============================================================
 
 # 1. SparkSession
@@ -30,6 +32,7 @@ POSTGRES_DB = os.getenv("POSTGRES_DB", "secom")
 POSTGRES_USER = os.getenv("POSTGRES_USER", "secom")
 POSTGRES_PASSWORD = os.getenv("POSTGRES_PASSWORD", "secom123")
 SPARK_CHECKPOINT_LOCATION = os.getenv("SPARK_CHECKPOINT_LOCATION", "/app/checkpoint/secom-streaming")
+FALLBACK_DIR = os.getenv("FALLBACK_DIR", "/data/fallback")
 
 JDBC_URL = f"jdbc:postgresql://{POSTGRES_HOST}:{POSTGRES_PORT}/{POSTGRES_DB}"
 JDBC_PROPERTIES = {
@@ -37,6 +40,9 @@ JDBC_PROPERTIES = {
     "password": POSTGRES_PASSWORD,
     "driver": "org.postgresql.Driver",
 }
+
+# Fallback 디렉토리 생성
+os.makedirs(FALLBACK_DIR, exist_ok=True)
 
 # 3. 이상치 탐지용 통계값
 SENSOR_STATS = {
@@ -93,14 +99,29 @@ def detect_anomalies(sensors):
 
     return anomalies
 
-# 5. 메시지 스키마
+# 5. DLQ Fallback 함수
+def save_to_fallback(batch_df, batch_id, table_name):
+    """DB 장애 시 로컬 JSON 파일로 저장 (Dead Letter Queue)"""
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S")
+    path = os.path.join(FALLBACK_DIR, f"{table_name}_batch{batch_id}_{timestamp}.json")
+
+    try:
+        # Spark DataFrame → JSON 파일 (Driver 수집)
+        rows = batch_df.toJSON().collect()
+        with open(path, "w") as f:
+            json.dump(rows, f)
+        print(f"  [DLQ] Saved {len(rows)} rows -> {path}")
+    except Exception as e:
+        print(f"  [DLQ] Fallback save ALSO failed: {e}")
+
+# 6. 메시지 스키마
 schema = StructType([
     StructField("event_time", StringType(), True),
     StructField("sensors", MapType(StringType(), FloatType()), True),
     StructField("pass_fail", IntegerType(), True),
 ])
 
-# 6. Kafka readStream
+# 7. Kafka readStream
 kafka_df = spark.readStream \
     .format("kafka") \
     .option("kafka.bootstrap.servers", "kafka:29092") \
@@ -108,7 +129,7 @@ kafka_df = spark.readStream \
     .option("startingOffsets", "latest") \
     .load()
 
-# 7. JSON 파싱
+# 8. JSON 파싱
 parsed_df = kafka_df \
     .selectExpr("CAST(value AS STRING) as json_str") \
     .select(from_json(col("json_str"), schema).alias("data")) \
@@ -118,7 +139,7 @@ parsed_df = kafka_df \
         col("data.pass_fail").alias("pass_fail"),
     )
 
-# 8. foreachBatch 처리 (collect 없는 v2)
+# 9. foreachBatch 처리 (v3: try-catch + DLQ)
 def process_batch(batch_df, batch_id):
     if batch_df.isEmpty():
         return
@@ -126,17 +147,24 @@ def process_batch(batch_df, batch_id):
     batch_df.persist()
     count = batch_df.count()
 
-    # Sink 1: raw_events (전부 저장)
+    # Sink 1: raw_events
     raw_df = batch_df.select(
         col("event_time"),
         to_json(col("sensors")).alias("sensors"),
         col("pass_fail"),
     )
-    raw_df.write \
-        .option("stringtype", "unspecified") \
-        .jdbc(JDBC_URL, "raw_events", mode="append", properties=JDBC_PROPERTIES)
 
-    # Sink 2: anomalies (UDF로 분산 처리 — collect 없음)
+    try:
+        raw_df.write \
+            .option("stringtype", "unspecified") \
+            .jdbc(JDBC_URL, "raw_events", mode="append", properties=JDBC_PROPERTIES)
+    except Exception as e:
+        print(f"Batch {batch_id}: [ERROR] raw_events write failed: {e}")
+        save_to_fallback(raw_df, batch_id, "raw_events")
+        batch_df.unpersist()
+        return  # raw 실패하면 anomaly도 건너뜀
+
+    # Sink 2: anomalies (UDF 분산 처리)
     anomaly_df = batch_df \
         .withColumn("anomaly_list", detect_anomalies(col("sensors"))) \
         .select(
@@ -155,13 +183,17 @@ def process_batch(batch_df, batch_id):
 
     anomaly_count = anomaly_df.count()
     if anomaly_count > 0:
-        anomaly_df.write \
-            .jdbc(JDBC_URL, "anomalies", mode="append", properties=JDBC_PROPERTIES)
+        try:
+            anomaly_df.write \
+                .jdbc(JDBC_URL, "anomalies", mode="append", properties=JDBC_PROPERTIES)
+        except Exception as e:
+            print(f"Batch {batch_id}: [ERROR] anomalies write failed: {e}")
+            save_to_fallback(anomaly_df, batch_id, "anomalies")
 
     print(f"Batch {batch_id}: {count} rows -> {anomaly_count} anomalies")
     batch_df.unpersist()
 
-# 9. 스트림 시작
+# 10. 스트림 시작
 print("Starting stream...")
 query = parsed_df.writeStream \
     .foreachBatch(process_batch) \
