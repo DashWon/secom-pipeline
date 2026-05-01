@@ -95,6 +95,27 @@ services:
     command: sleep infinity
     mem_limit: 2g
 
+  api:
+    build: ./api
+    container_name: secom-api
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./data:/data
+    environment:
+      POSTGRES_HOST: ${POSTGRES_HOST:-postgres}
+      POSTGRES_PORT: ${POSTGRES_PORT:-5432}
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      SECOM_CSV_PATH: /data/uci-secom.csv
+      MODEL_PATH: /app/model.joblib
+      TZ: Asia/Seoul
+    restart: always
+
   airflow-init:
     <<: *airflow-common
     container_name: airflow-init
