@@ -1,7 +1,8 @@
 """
-SECOM Pipeline — FastAPI 서버
-==============================
+SECOM Pipeline — FastAPI 서버 (v2: 커넥션 풀 적용)
+====================================================
 PostgreSQL 데이터 조회 + Isolation Forest 추론 API
+- Gemini 피드백 반영: get_conn() → 커넥션 풀 방식
 """
 
 import os
@@ -11,6 +12,7 @@ from typing import Optional
 import joblib
 import numpy as np
 import psycopg2
+import psycopg2.pool
 import psycopg2.extras
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
@@ -40,15 +42,39 @@ app.add_middleware(
 )
 
 
-# ── DB 연결 ────────────────────────────────────────────
-def get_conn():
-    return psycopg2.connect(
+# ── DB 커넥션 풀 ───────────────────────────────────────
+conn_pool = None
+
+@app.on_event("startup")
+def init_db_pool():
+    global conn_pool
+    conn_pool = psycopg2.pool.SimpleConnectionPool(
+        minconn=2,   # 최소 2개 연결 유지
+        maxconn=10,  # 최대 10개까지 확장
         host=POSTGRES_HOST,
         port=POSTGRES_PORT,
         dbname=POSTGRES_DB,
         user=POSTGRES_USER,
         password=POSTGRES_PASSWORD,
     )
+    print(f"DB connection pool created (min=2, max=10)")
+
+
+@app.on_event("shutdown")
+def close_db_pool():
+    if conn_pool:
+        conn_pool.closeall()
+        print("DB connection pool closed")
+
+
+def get_conn():
+    """풀에서 커넥션 빌려오기"""
+    return conn_pool.getconn()
+
+
+def put_conn(conn):
+    """풀에 커넥션 반납"""
+    conn_pool.putconn(conn)
 
 
 # ── 모델 로딩 (서버 시작 시 1회) ─────────────────────────
@@ -92,74 +118,82 @@ def root():
 @app.get("/health")
 def health_check():
     """DB 연결 상태 확인"""
+    conn = None
     try:
         conn = get_conn()
-        conn.close()
-        return {"status": "healthy", "database": "connected"}
+        cur = conn.cursor()
+        cur.execute("SELECT 1")
+        return {"status": "healthy", "database": "connected", "pool": "active"}
     except Exception as e:
         raise HTTPException(status_code=503, detail=f"DB connection failed: {str(e)}")
+    finally:
+        if conn:
+            put_conn(conn)
 
 
 @app.get("/anomalies/latest")
 def get_latest_anomalies(limit: int = Query(default=20, le=100)):
     """최근 이상치 목록 조회"""
     conn = get_conn()
-    cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-    cur.execute("""
-        SELECT id, event_time AT TIME ZONE 'Asia/Seoul' AS event_time_kst,
-               sensor_id, sensor_value, z_score, anomaly_type,
-               threshold_upper, threshold_lower
-        FROM anomalies
-        ORDER BY event_time DESC
-        LIMIT %s
-    """, (limit,))
-    rows = cur.fetchall()
-    conn.close()
+    try:
+        cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        cur.execute("""
+            SELECT id, event_time AT TIME ZONE 'Asia/Seoul' AS event_time_kst,
+                   sensor_id, sensor_value, z_score, anomaly_type,
+                   threshold_upper, threshold_lower
+            FROM anomalies
+            ORDER BY event_time DESC
+            LIMIT %s
+        """, (limit,))
+        rows = cur.fetchall()
 
-    # datetime을 문자열로 변환
-    for row in rows:
-        row["event_time_kst"] = row["event_time_kst"].isoformat()
+        for row in rows:
+            row["event_time_kst"] = row["event_time_kst"].isoformat()
 
-    return {"count": len(rows), "anomalies": rows}
+        return {"count": len(rows), "anomalies": rows}
+    finally:
+        put_conn(conn)
 
 
 @app.get("/anomalies/stats")
 def get_anomaly_stats(target_date: Optional[date] = Query(default=None)):
     """일별 이상치 통계 조회"""
     conn = get_conn()
-    cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+    try:
+        cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
 
-    if target_date:
-        cur.execute("""
-            SELECT
-                sensor_id,
-                anomaly_type,
-                COUNT(*) AS count,
-                ROUND(AVG(z_score)::numeric, 2) AS avg_z_score,
-                ROUND(MAX(z_score)::numeric, 2) AS max_z_score
-            FROM anomalies
-            WHERE (event_time AT TIME ZONE 'Asia/Seoul')::date = %s
-            GROUP BY sensor_id, anomaly_type
-            ORDER BY count DESC
-        """, (target_date,))
-    else:
-        cur.execute("""
-            SELECT
-                sensor_id,
-                anomaly_type,
-                COUNT(*) AS count,
-                ROUND(AVG(z_score)::numeric, 2) AS avg_z_score,
-                ROUND(MAX(z_score)::numeric, 2) AS max_z_score
-            FROM anomalies
-            GROUP BY sensor_id, anomaly_type
-            ORDER BY count DESC
-        """)
+        if target_date:
+            cur.execute("""
+                SELECT
+                    sensor_id,
+                    anomaly_type,
+                    COUNT(*) AS count,
+                    ROUND(AVG(z_score)::numeric, 2) AS avg_z_score,
+                    ROUND(MAX(z_score)::numeric, 2) AS max_z_score
+                FROM anomalies
+                WHERE (event_time AT TIME ZONE 'Asia/Seoul')::date = %s
+                GROUP BY sensor_id, anomaly_type
+                ORDER BY count DESC
+            """, (target_date,))
+        else:
+            cur.execute("""
+                SELECT
+                    sensor_id,
+                    anomaly_type,
+                    COUNT(*) AS count,
+                    ROUND(AVG(z_score)::numeric, 2) AS avg_z_score,
+                    ROUND(MAX(z_score)::numeric, 2) AS max_z_score
+                FROM anomalies
+                GROUP BY sensor_id, anomaly_type
+                ORDER BY count DESC
+            """)
 
-    rows = cur.fetchall()
-    total = sum(r["count"] for r in rows)
-    conn.close()
+        rows = cur.fetchall()
+        total = sum(r["count"] for r in rows)
 
-    return {"date": str(target_date) if target_date else "all", "total_anomalies": total, "by_sensor": rows}
+        return {"date": str(target_date) if target_date else "all", "total_anomalies": total, "by_sensor": rows}
+    finally:
+        put_conn(conn)
 
 
 @app.get("/daily-agg")
@@ -169,56 +203,60 @@ def get_daily_agg(
 ):
     """일일 집계 데이터 조회"""
     conn = get_conn()
-    cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+    try:
+        cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
 
-    query = "SELECT * FROM daily_agg"
-    params = []
-    conditions = []
+        query = "SELECT * FROM daily_agg"
+        params = []
+        conditions = []
 
-    if start_date:
-        conditions.append("date >= %s")
-        params.append(start_date)
-    if end_date:
-        conditions.append("date <= %s")
-        params.append(end_date)
+        if start_date:
+            conditions.append("date >= %s")
+            params.append(start_date)
+        if end_date:
+            conditions.append("date <= %s")
+            params.append(end_date)
 
-    if conditions:
-        query += " WHERE " + " AND ".join(conditions)
-    query += " ORDER BY date DESC"
+        if conditions:
+            query += " WHERE " + " AND ".join(conditions)
+        query += " ORDER BY date DESC"
 
-    cur.execute(query, params)
-    rows = cur.fetchall()
-    conn.close()
+        cur.execute(query, params)
+        rows = cur.fetchall()
 
-    for row in rows:
-        row["date"] = row["date"].isoformat()
-        if row.get("created_at"):
-            row["created_at"] = row["created_at"].isoformat()
+        for row in rows:
+            row["date"] = row["date"].isoformat()
+            if row.get("created_at"):
+                row["created_at"] = row["created_at"].isoformat()
 
-    return {"count": len(rows), "data": rows}
+        return {"count": len(rows), "data": rows}
+    finally:
+        put_conn(conn)
 
 
 @app.get("/raw-events/count")
 def get_raw_events_count():
     """raw_events 총 건수 및 최근 이벤트 시간"""
     conn = get_conn()
-    cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-    cur.execute("""
-        SELECT
-            COUNT(*) AS total_count,
-            MAX(event_time AT TIME ZONE 'Asia/Seoul') AS latest_event_kst,
-            MIN(event_time AT TIME ZONE 'Asia/Seoul') AS earliest_event_kst
-        FROM raw_events
-    """)
-    row = cur.fetchone()
-    conn.close()
+    try:
+        cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        cur.execute("""
+            SELECT
+                COUNT(*) AS total_count,
+                MAX(event_time AT TIME ZONE 'Asia/Seoul') AS latest_event_kst,
+                MIN(event_time AT TIME ZONE 'Asia/Seoul') AS earliest_event_kst
+            FROM raw_events
+        """)
+        row = cur.fetchone()
 
-    if row["latest_event_kst"]:
-        row["latest_event_kst"] = row["latest_event_kst"].isoformat()
-    if row["earliest_event_kst"]:
-        row["earliest_event_kst"] = row["earliest_event_kst"].isoformat()
+        if row["latest_event_kst"]:
+            row["latest_event_kst"] = row["latest_event_kst"].isoformat()
+        if row["earliest_event_kst"]:
+            row["earliest_event_kst"] = row["earliest_event_kst"].isoformat()
 
-    return row
+        return row
+    finally:
+        put_conn(conn)
 
 
 @app.post("/predict", response_model=PredictResponse)

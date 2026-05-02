@@ -116,6 +116,17 @@ services:
       TZ: Asia/Seoul
     restart: always
 
+  streamlit:
+    build: ./streamlit
+    container_name: secom-dashboard
+    depends_on:
+      - api
+    ports:
+      - "8501:8501"
+    environment:
+      TZ: Asia/Seoul
+    restart: always
+
   airflow-init:
     <<: *airflow-common
     container_name: airflow-init
