@@ -1,10 +1,3 @@
-"""
-SECOM Pipeline — FastAPI 서버 (v2: 커넥션 풀 적용)
-====================================================
-PostgreSQL 데이터 조회 + Isolation Forest 추론 API
-- Gemini 피드백 반영: get_conn() → 커넥션 풀 방식
-"""
-
 import os
 from datetime import date, datetime
 from typing import Optional

@@ -1,10 +1,3 @@
-"""
-SECOM Isolation Forest 모델 학습
-================================
-UCI SECOM CSV → Isolation Forest 학습 → model.joblib 저장
-API 서버 시작 시 이 모델을 로드해서 /predict에서 사용
-"""
-
 import pandas as pd
 import numpy as np
 from sklearn.ensemble import IsolationForest

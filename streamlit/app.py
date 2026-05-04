@@ -1,9 +1,3 @@
-"""
-SECOM Pipeline — Streamlit 대시보드
-=====================================
-FastAPI 엔드포인트에서 데이터를 가져와 시각화
-"""
-
 import streamlit as st
 import requests
 import pandas as pd
@@ -164,6 +158,9 @@ elif page == "📈 일일 집계":
         df["date"] = pd.to_datetime(df["date"])
         df = df.sort_values("date")
 
+        # anomaly_rate를 퍼센트로 변환 (0.3588 → 35.88)
+        df["anomaly_rate_pct"] = df["anomaly_rate"] * 100
+
         # 이벤트 수 + 이상치 수 트렌드
         st.subheader("일별 이벤트 및 이상치")
         fig = go.Figure()
@@ -172,15 +169,16 @@ elif page == "📈 일일 집계":
         fig.update_layout(barmode="overlay", xaxis_title="날짜", yaxis_title="건수")
         st.plotly_chart(fig, use_container_width=True)
 
-        # 이상치 비율 트렌드
+        # 이상치 비율 트렌드 (퍼센트, Y축 0~100 고정)
         st.subheader("일별 이상치 비율 (%)")
         fig2 = px.line(
-            df, x="date", y="anomaly_rate",
+            df, x="date", y="anomaly_rate_pct",
             markers=True,
             color_discrete_sequence=["#e74c3c"],
-            labels={"date": "날짜", "anomaly_rate": "이상치 비율 (%)"},
+            labels={"date": "날짜", "anomaly_rate_pct": "이상치 비율 (%)"},
         )
         fig2.add_hline(y=50, line_dash="dash", line_color="red", annotation_text="CRITICAL (50%)")
+        fig2.update_layout(yaxis_range=[0, 100])
         st.plotly_chart(fig2, use_container_width=True)
 
         # 테이블
