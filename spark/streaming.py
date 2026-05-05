@@ -2,11 +2,13 @@ import os
 import json
 from datetime import datetime, timezone
 
+import joblib
+import numpy as np
 from pyspark.sql import SparkSession
-from pyspark.sql.functions import col, from_json, to_json, udf, explode
+from pyspark.sql.functions import col, from_json, to_json, udf, lit
 from pyspark.sql.types import (
-    StringType, IntegerType, FloatType,
-    StructType, StructField, MapType, ArrayType
+    StringType, IntegerType, FloatType, BooleanType,
+    StructType, StructField, MapType
 )
 
 # ============================================================
@@ -33,6 +35,7 @@ POSTGRES_USER = os.getenv("POSTGRES_USER", "secom")
 POSTGRES_PASSWORD = os.getenv("POSTGRES_PASSWORD", "secom123")
 SPARK_CHECKPOINT_LOCATION = os.getenv("SPARK_CHECKPOINT_LOCATION", "/app/checkpoint/secom-streaming")
 FALLBACK_DIR = os.getenv("FALLBACK_DIR", "/data/fallback")
+MODEL_PATH = os.getenv("MODEL_PATH", "/app/model.joblib")
 
 JDBC_URL = f"jdbc:postgresql://{POSTGRES_HOST}:{POSTGRES_PORT}/{POSTGRES_DB}"
 JDBC_PROPERTIES = {
@@ -44,60 +47,48 @@ JDBC_PROPERTIES = {
 # Fallback 디렉토리 생성
 os.makedirs(FALLBACK_DIR, exist_ok=True)
 
-# 3. 이상치 탐지용 통계값
-SENSOR_STATS = {
-    "0": {"mean": 3045.2, "std": 152.7},
-    "1": {"mean": 2443.8, "std": 345.2},
-    "2": {"mean": 2198.5, "std": 120.3},
-    "5": {"mean": 99.8, "std": 2.1},
-    "10": {"mean": 0.012, "std": 0.005},
-}
-SIGMA_THRESHOLD = 3
-NAN_THRESHOLD = 100
+# 3. 모델 로드 (드라이버에서 1회)
+if not os.path.exists(MODEL_PATH):
+    raise FileNotFoundError(f"Model file not found: {MODEL_PATH}")
 
-# 4. 이상치 탐지 UDF (Executor에서 분산 실행)
-anomaly_schema = ArrayType(StructType([
-    StructField("sensor_id", StringType(), False),
-    StructField("sensor_value", FloatType(), False),
-    StructField("z_score", FloatType(), False),
+model_data = joblib.load(MODEL_PATH)
+model = model_data["model"]
+feature_names = model_data["feature_names"]
+feature_means = model_data["feature_means"]
+anomaly_threshold = float(model_data.get("anomaly_threshold", 0.0))
+
+print(f"Model loaded from {MODEL_PATH}")
+print(f"Feature count: {len(feature_names)} | threshold: {anomaly_threshold}")
+
+# 4. 모델 기반 이상치 판정 UDF
+model_result_schema = StructType([
+    StructField("is_anomaly", BooleanType(), False),
+    StructField("anomaly_score", FloatType(), False),
     StructField("anomaly_type", StringType(), False),
-    StructField("threshold_upper", FloatType(), False),
-    StructField("threshold_lower", FloatType(), False),
-]))
+])
 
-# closure로 통계값 캡처 → 각 Executor에 자동 전달
-_stats = SENSOR_STATS
-_sigma = SIGMA_THRESHOLD
-_nan_threshold = NAN_THRESHOLD
+_model = model
+_feature_names = feature_names
+_feature_means = feature_means
+_threshold = anomaly_threshold
 
-@udf(returnType=anomaly_schema)
-def detect_anomalies(sensors):
+@udf(returnType=model_result_schema)
+def score_event_with_model(sensors):
     if sensors is None:
-        return []
+        return (False, 0.0, "NO_DATA")
 
-    anomalies = []
-
-    # NaN 체크
-    nan_count = sum(1 for v in sensors.values() if v is None)
-    if nan_count > _nan_threshold:
-        anomalies.append(("ALL", 0.0, float(nan_count), "SENSOR_FAULT", 0.0, 0.0))
-        return anomalies
-
-    # 3시그마 체크
-    for sensor_id, stat in _stats.items():
-        value = sensors.get(sensor_id)
+    values = []
+    for feature_name in _feature_names:
+        value = sensors.get(feature_name)
         if value is None:
-            continue
-        z_score = abs(value - stat["mean"]) / stat["std"]
-        if z_score > _sigma:
-            upper = stat["mean"] + _sigma * stat["std"]
-            lower = stat["mean"] - _sigma * stat["std"]
-            anomalies.append((
-                sensor_id, float(value), round(z_score, 4),
-                "3SIGMA_VIOLATION", round(upper, 4), round(lower, 4),
-            ))
+            value = _feature_means.get(feature_name, 0.0)
+        values.append(float(value))
 
-    return anomalies
+    X = np.array(values, dtype=np.float32).reshape(1, -1)
+    score = float(_model.decision_function(X)[0])  # 낮을수록 이상
+    is_anomaly = score < _threshold
+
+    return (is_anomaly, score, "IFOREST")
 
 # 5. DLQ Fallback 함수
 def save_to_fallback(batch_df, batch_id, table_name):
@@ -164,21 +155,27 @@ def process_batch(batch_df, batch_id):
         batch_df.unpersist()
         return  # raw 실패하면 anomaly도 건너뜀
 
-    # Sink 2: anomalies (UDF 분산 처리)
-    anomaly_df = batch_df \
-        .withColumn("anomaly_list", detect_anomalies(col("sensors"))) \
+    # Sink 2: anomalies (모델 기반 이벤트 판정)
+    scored_df = batch_df \
+        .withColumn("model_result", score_event_with_model(col("sensors"))) \
         .select(
             col("event_time"),
-            explode(col("anomaly_list")).alias("anomaly")
-        ) \
+            col("model_result.is_anomaly").alias("is_anomaly"),
+            col("model_result.anomaly_score").alias("anomaly_score"),
+            col("model_result.anomaly_type").alias("anomaly_type"),
+        )
+
+    # 기존 anomalies 테이블과의 스키마 호환을 위한 임시 매핑
+    anomaly_df = scored_df \
+        .filter(col("is_anomaly") == True) \
         .select(
             col("event_time"),
-            col("anomaly.sensor_id"),
-            col("anomaly.sensor_value"),
-            col("anomaly.z_score"),
-            col("anomaly.anomaly_type"),
-            col("anomaly.threshold_upper"),
-            col("anomaly.threshold_lower"),
+            lit("MODEL").alias("sensor_id"),
+            lit(0.0).cast("float").alias("sensor_value"),
+            col("anomaly_score").cast("float").alias("z_score"),
+            col("anomaly_type"),
+            lit(None).cast("float").alias("threshold_upper"),
+            lit(None).cast("float").alias("threshold_lower"),
         )
 
     anomaly_count = anomaly_df.count()
@@ -190,7 +187,7 @@ def process_batch(batch_df, batch_id):
             print(f"Batch {batch_id}: [ERROR] anomalies write failed: {e}")
             save_to_fallback(anomaly_df, batch_id, "anomalies")
 
-    print(f"Batch {batch_id}: {count} rows -> {anomaly_count} anomalies")
+    print(f"Batch {batch_id}: {count} rows -> {anomaly_count} model anomalies")
     batch_df.unpersist()
 
 # 10. 스트림 시작

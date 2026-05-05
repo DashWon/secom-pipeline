@@ -20,6 +20,7 @@ api/model.joblib
 
 .idea/
 .cursor/
+.claude/
 
 .DS_Store
 Thumbs.db

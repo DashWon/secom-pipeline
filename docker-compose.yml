@@ -91,6 +91,7 @@ services:
       POSTGRES_USER: ${POSTGRES_USER}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
       SPARK_CHECKPOINT_LOCATION: /app/checkpoint/secom-streaming
+      MODEL_PATH: /data/model.joblib
       TZ: Asia/Seoul
     command: sleep infinity
     mem_limit: 2g
@@ -112,7 +113,7 @@ services:
       POSTGRES_USER: ${POSTGRES_USER}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
       SECOM_CSV_PATH: /data/uci-secom.csv
-      MODEL_PATH: /app/model.joblib
+      MODEL_PATH: /data/model.joblib
       TZ: Asia/Seoul
     restart: always
 
