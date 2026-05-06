@@ -18,6 +18,16 @@ CREATE TABLE IF NOT EXISTS anomalies (
     inserted_at TIMESTAMPTZ DEFAULT NOW()
 );
 
+CREATE TABLE IF NOT EXISTS event_anomalies (
+    id SERIAL PRIMARY KEY,
+    event_time TIMESTAMPTZ NOT NULL,
+    is_anomaly BOOLEAN NOT NULL,
+    anomaly_score FLOAT NOT NULL,
+    anomaly_type VARCHAR(50) NOT NULL,
+    model_version VARCHAR(50) NOT NULL DEFAULT 'iforest-v1',
+    inserted_at TIMESTAMPTZ DEFAULT NOW()
+);
+
 CREATE TABLE IF NOT EXISTS daily_agg (
     date DATE PRIMARY KEY,
     total_events INTEGER,
@@ -29,6 +39,8 @@ CREATE TABLE IF NOT EXISTS daily_agg (
 
 CREATE INDEX IF NOT EXISTS idx_raw_events_time ON raw_events(event_time);
 CREATE INDEX IF NOT EXISTS idx_anomalies_time ON anomalies(event_time);
+CREATE INDEX IF NOT EXISTS idx_event_anomalies_time ON event_anomalies(event_time);
+CREATE INDEX IF NOT EXISTS idx_event_anomalies_flag ON event_anomalies(is_anomaly);
 
 -- 기존 로컬 TIMESTAMP 데이터를 UTC 표준 TIMESTAMPTZ로 마이그레이션 (KST 기준 해석)
 DO $$
@@ -83,3 +95,14 @@ SELECT
     threshold_lower,
     inserted_at AT TIME ZONE 'Asia/Seoul' AS inserted_at_kst
 FROM anomalies;
+
+CREATE OR REPLACE VIEW event_anomalies_kst AS
+SELECT
+    id,
+    event_time AT TIME ZONE 'Asia/Seoul' AS event_time_kst,
+    is_anomaly,
+    anomaly_score,
+    anomaly_type,
+    model_version,
+    inserted_at AT TIME ZONE 'Asia/Seoul' AS inserted_at_kst
+FROM event_anomalies;

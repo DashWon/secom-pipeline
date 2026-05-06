@@ -3,7 +3,7 @@ import json
 from datetime import datetime, timezone
 
 import joblib
-import numpy as np
+import pandas as pd
 from pyspark.sql import SparkSession
 from pyspark.sql.functions import col, from_json, to_json, udf, lit
 from pyspark.sql.types import (
@@ -35,7 +35,7 @@ POSTGRES_USER = os.getenv("POSTGRES_USER", "secom")
 POSTGRES_PASSWORD = os.getenv("POSTGRES_PASSWORD", "secom123")
 SPARK_CHECKPOINT_LOCATION = os.getenv("SPARK_CHECKPOINT_LOCATION", "/app/checkpoint/secom-streaming")
 FALLBACK_DIR = os.getenv("FALLBACK_DIR", "/data/fallback")
-MODEL_PATH = os.getenv("MODEL_PATH", "/app/model.joblib")
+MODEL_PATH = os.getenv("MODEL_PATH", "/data/model.joblib")
 
 JDBC_URL = f"jdbc:postgresql://{POSTGRES_HOST}:{POSTGRES_PORT}/{POSTGRES_DB}"
 JDBC_PROPERTIES = {
@@ -56,9 +56,10 @@ model = model_data["model"]
 feature_names = model_data["feature_names"]
 feature_means = model_data["feature_means"]
 anomaly_threshold = float(model_data.get("anomaly_threshold", 0.0))
+model_version = str(model_data.get("model_version", "iforest-v1"))
 
 print(f"Model loaded from {MODEL_PATH}")
-print(f"Feature count: {len(feature_names)} | threshold: {anomaly_threshold}")
+print(f"Feature count: {len(feature_names)} | threshold: {anomaly_threshold} | model_version: {model_version}")
 
 # 4. 모델 기반 이상치 판정 UDF
 model_result_schema = StructType([
@@ -84,7 +85,8 @@ def score_event_with_model(sensors):
             value = _feature_means.get(feature_name, 0.0)
         values.append(float(value))
 
-    X = np.array(values, dtype=np.float32).reshape(1, -1)
+    # 학습 시 DataFrame(컬럼명 포함)으로 fit 했으므로 추론도 동일 포맷 사용
+    X = pd.DataFrame([values], columns=_feature_names)
     score = float(_model.decision_function(X)[0])  # 낮을수록 이상
     is_anomaly = score < _threshold
 
@@ -155,7 +157,7 @@ def process_batch(batch_df, batch_id):
         batch_df.unpersist()
         return  # raw 실패하면 anomaly도 건너뜀
 
-    # Sink 2: anomalies (모델 기반 이벤트 판정)
+    # Sink 2: event_anomalies (모델 기반 이벤트 판정, 이벤트 단위 저장)
     scored_df = batch_df \
         .withColumn("model_result", score_event_with_model(col("sensors"))) \
         .select(
@@ -163,31 +165,18 @@ def process_batch(batch_df, batch_id):
             col("model_result.is_anomaly").alias("is_anomaly"),
             col("model_result.anomaly_score").alias("anomaly_score"),
             col("model_result.anomaly_type").alias("anomaly_type"),
+            lit(model_version).alias("model_version"),
         )
 
-    # 기존 anomalies 테이블과의 스키마 호환을 위한 임시 매핑
-    anomaly_df = scored_df \
-        .filter(col("is_anomaly") == True) \
-        .select(
-            col("event_time"),
-            lit("MODEL").alias("sensor_id"),
-            lit(0.0).cast("float").alias("sensor_value"),
-            col("anomaly_score").cast("float").alias("z_score"),
-            col("anomaly_type"),
-            lit(None).cast("float").alias("threshold_upper"),
-            lit(None).cast("float").alias("threshold_lower"),
-        )
+    anomaly_count = scored_df.filter(col("is_anomaly") == True).count()
+    try:
+        scored_df.write \
+            .jdbc(JDBC_URL, "event_anomalies", mode="append", properties=JDBC_PROPERTIES)
+    except Exception as e:
+        print(f"Batch {batch_id}: [ERROR] event_anomalies write failed: {e}")
+        save_to_fallback(scored_df, batch_id, "event_anomalies")
 
-    anomaly_count = anomaly_df.count()
-    if anomaly_count > 0:
-        try:
-            anomaly_df.write \
-                .jdbc(JDBC_URL, "anomalies", mode="append", properties=JDBC_PROPERTIES)
-        except Exception as e:
-            print(f"Batch {batch_id}: [ERROR] anomalies write failed: {e}")
-            save_to_fallback(anomaly_df, batch_id, "anomalies")
-
-    print(f"Batch {batch_id}: {count} rows -> {anomaly_count} model anomalies")
+    print(f"Batch {batch_id}: {count} rows scored -> {anomaly_count} anomalies")
     batch_df.unpersist()
 
 # 10. 스트림 시작

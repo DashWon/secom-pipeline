@@ -131,10 +131,13 @@ def get_latest_anomalies(limit: int = Query(default=20, le=100)):
     try:
         cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
         cur.execute("""
-            SELECT id, event_time AT TIME ZONE 'Asia/Seoul' AS event_time_kst,
-                   sensor_id, sensor_value, z_score, anomaly_type,
-                   threshold_upper, threshold_lower
-            FROM anomalies
+            SELECT id,
+                   event_time AT TIME ZONE 'Asia/Seoul' AS event_time_kst,
+                   anomaly_score,
+                   anomaly_type,
+                   model_version
+            FROM event_anomalies
+            WHERE is_anomaly = TRUE
             ORDER BY event_time DESC
             LIMIT %s
         """, (limit,))
@@ -155,36 +158,40 @@ def get_anomaly_stats(target_date: Optional[date] = Query(default=None)):
     try:
         cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
 
+        where_clause = ""
+        params = []
         if target_date:
-            cur.execute("""
-                SELECT
-                    sensor_id,
-                    anomaly_type,
-                    COUNT(*) AS count,
-                    ROUND(AVG(z_score)::numeric, 2) AS avg_z_score,
-                    ROUND(MAX(z_score)::numeric, 2) AS max_z_score
-                FROM anomalies
-                WHERE (event_time AT TIME ZONE 'Asia/Seoul')::date = %s
-                GROUP BY sensor_id, anomaly_type
-                ORDER BY count DESC
-            """, (target_date,))
-        else:
-            cur.execute("""
-                SELECT
-                    sensor_id,
-                    anomaly_type,
-                    COUNT(*) AS count,
-                    ROUND(AVG(z_score)::numeric, 2) AS avg_z_score,
-                    ROUND(MAX(z_score)::numeric, 2) AS max_z_score
-                FROM anomalies
-                GROUP BY sensor_id, anomaly_type
-                ORDER BY count DESC
-            """)
+            where_clause = "WHERE (event_time AT TIME ZONE 'Asia/Seoul')::date = %s"
+            params.append(target_date)
 
+        cur.execute(f"""
+            SELECT
+                COUNT(*) AS total_scored,
+                COUNT(*) FILTER (WHERE is_anomaly = TRUE) AS total_anomalies
+            FROM event_anomalies
+            {where_clause}
+        """, params)
+        summary = cur.fetchone()
+
+        cur.execute(f"""
+            SELECT
+                anomaly_type,
+                COUNT(*) FILTER (WHERE is_anomaly = TRUE) AS count,
+                ROUND(AVG(anomaly_score) FILTER (WHERE is_anomaly = TRUE)::numeric, 4) AS avg_anomaly_score,
+                ROUND(MIN(anomaly_score) FILTER (WHERE is_anomaly = TRUE)::numeric, 4) AS min_anomaly_score
+            FROM event_anomalies
+            {where_clause}
+            GROUP BY anomaly_type
+            ORDER BY count DESC
+        """, params)
         rows = cur.fetchall()
-        total = sum(r["count"] for r in rows)
 
-        return {"date": str(target_date) if target_date else "all", "total_anomalies": total, "by_sensor": rows}
+        return {
+            "date": str(target_date) if target_date else "all",
+            "total_scored": summary["total_scored"] or 0,
+            "total_anomalies": summary["total_anomalies"] or 0,
+            "by_type": rows,
+        }
     finally:
         put_conn(conn)
 

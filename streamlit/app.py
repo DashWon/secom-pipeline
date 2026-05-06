@@ -73,25 +73,24 @@ if page == "📊 대시보드":
     stats = api_get("/anomalies/stats")
     if stats:
         col3.metric("총 이상치", f"{stats['total_anomalies']:,}")
-        sensor_count = len(stats.get("by_sensor", []))
-        col4.metric("이상 센서 수", sensor_count)
+        col4.metric("총 스코어링", f"{stats.get('total_scored', 0):,}")
 
     st.markdown("---")
 
-    # 센서별 이상치 Top 10 Bar 차트
-    if stats and stats.get("by_sensor"):
-        st.subheader("🔴 센서별 이상치 Top 10")
-        df_sensor = pd.DataFrame(stats["by_sensor"])
-        df_top10 = df_sensor.nlargest(10, "count")
+    # 유형별 이상치 분포
+    if stats and stats.get("by_type"):
+        st.subheader("🔴 유형별 이상치 분포")
+        df_type = pd.DataFrame(stats["by_type"])
+        df_top10 = df_type.nlargest(10, "count")
 
         fig = px.bar(
             df_top10,
-            x="sensor_id",
+            x="anomaly_type",
             y="count",
-            color="avg_z_score",
+            color="avg_anomaly_score",
             color_continuous_scale="Reds",
-            labels={"sensor_id": "센서 ID", "count": "이상치 건수", "avg_z_score": "평균 Z-Score"},
-            title="이상치 발생 빈도 Top 10 센서",
+            labels={"anomaly_type": "탐지 유형", "count": "이상치 건수", "avg_anomaly_score": "평균 이상 점수"},
+            title="탐지 유형별 이상치 발생 건수",
         )
         fig.update_layout(xaxis_type="category")
         st.plotly_chart(fig, use_container_width=True)
@@ -119,25 +118,24 @@ elif page == "🔍 이상치 모니터링":
         df = pd.DataFrame(data["anomalies"])
         df = df.rename(columns={
             "event_time_kst": "시간 (KST)",
-            "sensor_id": "센서",
-            "sensor_value": "센서값",
-            "z_score": "Z-Score",
+            "anomaly_score": "Anomaly Score",
             "anomaly_type": "유형",
+            "model_version": "모델 버전",
         })
 
-        # Z-Score 분포 차트
-        st.subheader("Z-Score 분포")
+        # Anomaly Score 분포 차트
+        st.subheader("Anomaly Score 분포")
         fig = px.histogram(
-            df, x="Z-Score", nbins=20,
+            df, x="Anomaly Score", nbins=20,
             color_discrete_sequence=["#e74c3c"],
-            title="이상치 Z-Score 분포",
+            title="이상치 점수 분포",
         )
         st.plotly_chart(fig, use_container_width=True)
 
         # 테이블
         st.subheader("이상치 상세")
         st.dataframe(
-            df[["시간 (KST)", "센서", "센서값", "Z-Score", "유형"]],
+            df[["시간 (KST)", "Anomaly Score", "유형", "모델 버전"]],
             use_container_width=True,
             hide_index=True,
         )
