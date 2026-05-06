@@ -268,6 +268,7 @@ def predict(req: PredictRequest):
     model = model_data["model"]
     feature_names = model_data["feature_names"]
     feature_means = model_data["feature_means"]
+    anomaly_threshold = float(model_data.get("anomaly_threshold", 0.0))
 
     # 입력 센서값을 모델 feature 순서에 맞게 정렬
     values = []
@@ -281,11 +282,9 @@ def predict(req: PredictRequest):
 
     X = np.array(values).reshape(1, -1)
 
-    # 추론
-    prediction = model.predict(X)[0]       # 1=정상, -1=이상
+    # 추론 (score 기준선은 학습 메타데이터의 anomaly_threshold 사용)
     score = model.decision_function(X)[0]  # 낮을수록 이상
-
-    is_anomaly = prediction == -1
+    is_anomaly = score < anomaly_threshold
     message = "ANOMALY DETECTED" if is_anomaly else "Normal"
 
     return PredictResponse(

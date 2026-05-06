@@ -49,7 +49,7 @@ os.makedirs(FALLBACK_DIR, exist_ok=True)
 
 # 3. 모델 로드 (드라이버에서 1회)
 if not os.path.exists(MODEL_PATH):
-    raise FileNotFoundError(f"Model file not found: {MODEL_PATH}")
+    raise FileNotFoundError(f"모델 파일을 찾을 수 없습니다: {MODEL_PATH}")
 
 model_data = joblib.load(MODEL_PATH)
 model = model_data["model"]
@@ -85,7 +85,7 @@ def score_event_with_model(sensors):
             value = _feature_means.get(feature_name, 0.0)
         values.append(float(value))
 
-    # 학습 시 DataFrame(컬럼명 포함)으로 fit 했으므로 추론도 동일 포맷 사용
+    # 학습 시 DataFrame형식으로 학습 했으므로 추론도 동일 포맷 사용
     X = pd.DataFrame([values], columns=_feature_names)
     score = float(_model.decision_function(X)[0])  # 낮을수록 이상
     is_anomaly = score < _threshold

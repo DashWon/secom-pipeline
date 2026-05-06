@@ -6,6 +6,7 @@ import os
 
 CSV_PATH = os.getenv("SECOM_CSV_PATH", "data/uci-secom.csv")
 MODEL_PATH = os.getenv("MODEL_PATH", "api/model.joblib")
+MODEL_VERSION = os.getenv("MODEL_VERSION", "iforest-v2")
 
 def train():
     print("Loading data...")
@@ -23,25 +24,33 @@ def train():
 
     print(f"Training Isolation Forest on {X.shape[0]} rows, {X.shape[1]} features...")
 
+    contamination = 0.05
     model = IsolationForest(
         n_estimators=100,       # 트리 100개
-        contamination=0.1,      # 이상치 비율 약 10% 가정
+        contamination=contamination,  # 이상치 비율 약 5% 가정
         random_state=42,
         n_jobs=-1,              # CPU 코어 전부 사용
     )
     model.fit(X)
+
+    # 운영 기준선을 모델 메타데이터로 함께 저장
+    scores = model.decision_function(X)
+    anomaly_threshold = float(np.percentile(scores, contamination * 100))
 
     # 모델 저장
     joblib.dump({
         "model": model,
         "feature_names": sensor_cols,
         "feature_means": X.mean().to_dict(),  # NaN 대체용
+        "anomaly_threshold": anomaly_threshold,
+        "model_version": MODEL_VERSION,
     }, MODEL_PATH)
 
     print(f"Model saved to {MODEL_PATH}")
+    print(f"Model version: {MODEL_VERSION}")
+    print(f"Anomaly threshold: {anomaly_threshold:.6f}")
 
     # 간단 검증
-    scores = model.decision_function(X)
     preds = model.predict(X)
     anomaly_count = (preds == -1).sum()
     print(f"Anomalies detected: {anomaly_count}/{len(X)} ({anomaly_count/len(X)*100:.1f}%)")
